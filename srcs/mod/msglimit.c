@@ -2,6 +2,7 @@
 #include "customcom/customcom.h"
 #include "utils/utils.h"
 #include <concord/discord_codecs.h>
+#include <concord/interaction.h>
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -32,6 +33,8 @@ static void get_today_utc(char *buf, size_t sz) {
 
 static bool message_is_media(const struct discord_message *event) {
   if (event->attachments && event->attachments->size > 0)
+    return true;
+  if (event->sticker_items && event->sticker_items->size > 0)
     return true;
   if (event->message_reference && event->message_reference->type == 1)
     return true;
@@ -177,6 +180,99 @@ bool msglimit_enforce(struct discord *client,
     return true;
   }
   return false;
+}
+
+
+/*
+ * Application commands do not arrive as user-authored MESSAGE_CREATE events.
+ * Count them against the user's daily text allowance before dispatching the
+ * interaction, and reject over-limit commands with an ephemeral response.
+ */
+bool msglimit_enforce_interaction(
+    struct discord *client, const struct discord_interaction *event) {
+  if (!event || event->type != DISCORD_INTERACTION_APPLICATION_COMMAND)
+    return false;
+  if (!event->guild_id || !event->id || !event->token)
+    return false;
+
+  struct discord_user *user = NULL;
+  if (event->member && event->member->user)
+    user = event->member->user;
+  else
+    user = event->user;
+
+  if (!user || user->bot)
+    return false;
+
+  sqlite3 *db = customcom_get_db();
+  sqlite3_stmt *stmt = NULL;
+  int text_limit = 0;
+
+  if (sqlite3_prepare_v2(
+          db,
+          "SELECT text_limit FROM msglimit_settings "
+          "WHERE guild_id = ? AND user_id = ?",
+          -1, &stmt, NULL) != SQLITE_OK)
+    return false;
+
+  sqlite3_bind_int64(stmt, 1, (sqlite3_int64)event->guild_id);
+  sqlite3_bind_int64(stmt, 2, (sqlite3_int64)user->id);
+  if (sqlite3_step(stmt) == SQLITE_ROW)
+    text_limit = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+
+  if (text_limit <= 0)
+    return false;
+
+  char day[16];
+  get_today_utc(day, sizeof day);
+
+  if (sqlite3_prepare_v2(
+          db,
+          "INSERT INTO msglimit_counts "
+          "(guild_id, user_id, day, text_count) VALUES (?, ?, ?, 1) "
+          "ON CONFLICT(guild_id, user_id, day) DO UPDATE SET "
+          "text_count = text_count + 1",
+          -1, &stmt, NULL) != SQLITE_OK)
+    return false;
+
+  sqlite3_bind_int64(stmt, 1, (sqlite3_int64)event->guild_id);
+  sqlite3_bind_int64(stmt, 2, (sqlite3_int64)user->id);
+  sqlite3_bind_text(stmt, 3, day, -1, SQLITE_TRANSIENT);
+  int write_rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (write_rc != SQLITE_DONE)
+    return false;
+
+  int count = 0;
+  if (sqlite3_prepare_v2(
+          db,
+          "SELECT text_count FROM msglimit_counts "
+          "WHERE guild_id = ? AND user_id = ? AND day = ?",
+          -1, &stmt, NULL) != SQLITE_OK)
+    return false;
+
+  sqlite3_bind_int64(stmt, 1, (sqlite3_int64)event->guild_id);
+  sqlite3_bind_int64(stmt, 2, (sqlite3_int64)user->id);
+  sqlite3_bind_text(stmt, 3, day, -1, SQLITE_TRANSIENT);
+  if (sqlite3_step(stmt) == SQLITE_ROW)
+    count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+
+  if (count <= text_limit)
+    return false;
+
+  struct discord_interaction_response response = {
+      .type = DISCORD_INTERACTION_CHANNEL_MESSAGE_WITH_SOURCE,
+      .data = &(struct discord_interaction_callback_data){
+          .content = "Daily text message limit reached. Try again after "
+                     "00:00 UTC.",
+          .flags = DISCORD_MESSAGE_EPHEMERAL,
+      },
+  };
+  discord_create_interaction_response(client, event->id, event->token,
+                                      &response, NULL);
+  return true;
 }
 
 bool message_is_forwarded(const struct discord_message *event) {

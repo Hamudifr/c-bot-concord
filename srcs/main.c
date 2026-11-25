@@ -58,6 +58,13 @@ GUARDED(ptystart_command, ptystart_command)
 GUARDED(ptystop_command, ptystop_command)
 GUARDED(rolesync_command, rolesync_command)
 
+static void on_interaction_create_guarded(
+    struct discord *client, const struct discord_interaction *event) {
+  if (msglimit_enforce_interaction(client, event))
+    return;
+  on_interaction_create(client, event);
+}
+
 static struct discord *g_client;
 
 static void handle_sigint(int sig) {
@@ -139,7 +146,7 @@ int main(void) {
 
   discord_set_on_message_create(client, &on_message_fallback);
 
-  discord_set_on_interaction_create(client, &on_interaction_create);
+  discord_set_on_interaction_create(client, &on_interaction_create_guarded);
 
   discord_set_on_guild_member_add(client, &on_guild_member_add_rolesync);
 
