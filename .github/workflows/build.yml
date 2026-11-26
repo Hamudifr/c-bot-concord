@@ -37,8 +37,9 @@ jobs:
           make -j2
           sudo make install
           sudo ldconfig
-          curl --version
-          curl --version | grep -q 'WebSockets'
+          test -x /usr/local/bin/curl
+          /usr/local/bin/curl --version
+          /usr/local/bin/curl --version | grep -q 'WebSockets'
 
       - name: Check out pinned Concord dependency
         run: |
