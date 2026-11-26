@@ -1,0 +1,57 @@
+name: Build bot against pinned Concord
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: concord-build-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gnu11-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out bot
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf libtool pkg-config libssl-dev zlib1g-dev libsqlite3-dev
+
+      - name: Build curl with WebSocket support
+        run: |
+          curl -fsSLo curl-8.7.1.tar.xz https://curl.se/download/curl-8.7.1.tar.xz
+          echo "6fea2aac6a4610fbd0400afb0bcddbe7258a64c63f1f68e5855ebc0c659710cd  curl-8.7.1.tar.xz" | sha256sum --check
+          tar -xf curl-8.7.1.tar.xz
+          cd curl-8.7.1
+          ./configure --prefix=/usr/local --with-openssl --with-zlib --enable-websockets
+          make -j2
+          sudo make install
+          sudo ldconfig
+          curl --version
+          curl --version | grep -q 'WebSockets'
+
+      - name: Check out pinned Concord dependency
+        run: |
+          test "$(cat CONCORD_REVISION)" = "3f70c141a07492842e57e55e7cb398aa46661ba4"
+          git clone https://github.com/Cogmasters/concord.git concord
+          git -C concord checkout --detach "$(cat CONCORD_REVISION)"
+          test "$(git -C concord rev-parse HEAD)" = "$(cat CONCORD_REVISION)"
+
+      - name: Build Concord static library
+        run: make -C concord -j2
+
+      - name: Build bot with GNU11
+        run: |
+          make -j2
+          test -s bins/cfbot
+          file bins/cfbot
