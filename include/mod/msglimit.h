@@ -9,6 +9,8 @@ void msglimit_command(struct discord *client,
                       const struct discord_message *event);
 bool msglimit_enforce(struct discord *client,
                       const struct discord_message *event);
+bool msglimit_enforce_interaction(
+    struct discord *client, const struct discord_interaction *event);
 void msglimit_enforce_edit(struct discord *client,
                            const struct discord_message *event);
 bool message_is_forwarded(const struct discord_message *event);

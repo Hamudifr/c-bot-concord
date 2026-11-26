@@ -29,6 +29,13 @@ CPPFLAGS:= -MMD -MP
 LDFLAGS := -L$(CONCORD_DIR)/lib
 LDLIBS  := -ldiscord -lsqlite3 -lpthread -lcurl -lm
 
+# Select the Concord API generation explicitly. The local default preserves
+# compatibility with existing legacy Concord checkouts; CI pins and tests v3.
+CONCORD_API ?= legacy
+ifeq ($(CONCORD_API),v3)
+CFLAGS += -DCONCORD_API_V3
+endif
+
 # === Rules ====================================================================
 .PHONY: all clean fclean re
 

@@ -2,6 +2,7 @@
 #include "customcom/customcom.h"
 #include "utils/utils.h"
 #include <concord/discord_codecs.h>
+#include <concord/interaction.h>
 #include <sqlite3.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -33,8 +34,23 @@ static void get_today_utc(char *buf, size_t sz) {
 static bool message_is_media(const struct discord_message *event) {
   if (event->attachments && event->attachments->size > 0)
     return true;
+  if (event->sticker_items && event->sticker_items->size > 0)
+    return true;
+#ifdef CONCORD_API_V3
+  /* Concord v3 does not expose message_reference.type. Count media carried
+   * by a resolved referenced message when Discord supplies it. */
+  if (event->referenced_message &&
+      ((event->referenced_message->attachments &&
+        event->referenced_message->attachments->size > 0) ||
+       (event->referenced_message->sticker_items &&
+        event->referenced_message->sticker_items->size > 0) ||
+       (event->referenced_message->embeds &&
+        event->referenced_message->embeds->size > 0)))
+    return true;
+#else
   if (event->message_reference && event->message_reference->type == 1)
     return true;
+#endif
   if (event->content &&
       (strstr(event->content, "http://") || strstr(event->content, "https://")))
     return true;
@@ -179,8 +195,205 @@ bool msglimit_enforce(struct discord *client,
   return false;
 }
 
+
+/*
+ * Application commands do not arrive as user-authored MESSAGE_CREATE events.
+ * Count them against the user's daily text allowance before dispatching the
+ * interaction, and reject over-limit commands with an ephemeral response.
+ */
+static void msglimit_interaction_reply(
+    struct discord *client, const struct discord_interaction *event,
+    const char *content) {
+  struct discord_interaction_response response = {
+      .type = DISCORD_INTERACTION_CHANNEL_MESSAGE_WITH_SOURCE,
+      .data = &(struct discord_interaction_callback_data){
+          .content = (char *)content,
+          .flags = DISCORD_MESSAGE_EPHEMERAL,
+      },
+  };
+  discord_create_interaction_response(client, event->id, event->token,
+                                      &response, NULL);
+}
+
+/*
+ * Application commands do not arrive as user-authored MESSAGE_CREATE events.
+ * Count them transactionally before dispatch. If the limit cannot be read or
+ * updated, reject the interaction rather than silently bypassing enforcement.
+ */
+bool msglimit_enforce_interaction(
+    struct discord *client, const struct discord_interaction *event) {
+  if (!event || event->type != DISCORD_INTERACTION_APPLICATION_COMMAND)
+    return false;
+  /* DM commands have no guild-scoped message-limit policy. */
+  if (!event->guild_id)
+    return false;
+
+  /* A malformed guild interaction must never bypass the guard and dispatch. */
+  if (!event->id || !event->token)
+    return true;
+
+  struct discord_user *user = NULL;
+  if (event->member && event->member->user)
+    user = event->member->user;
+  else
+    user = event->user;
+
+  if (!user || !user->id) {
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to identify your account for the daily command limit.");
+    return true;
+  }
+  if (user->bot)
+    return false;
+
+  sqlite3 *db = customcom_get_db();
+  if (!db) {
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  sqlite3_stmt *stmt = NULL;
+  int text_limit = 0;
+  int rc = sqlite3_prepare_v2(
+      db,
+      "SELECT text_limit FROM msglimit_settings "
+      "WHERE guild_id = ? AND user_id = ?",
+      -1, &stmt, NULL);
+  if (rc != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 1, (sqlite3_int64)event->guild_id) != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 2, (sqlite3_int64)user->id) != SQLITE_OK) {
+    if (stmt)
+      sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW)
+    text_limit = sqlite3_column_int(stmt, 0);
+  else if (rc != SQLITE_DONE) {
+    sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+  sqlite3_finalize(stmt);
+
+  if (text_limit <= 0) {
+    if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+      sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+      msglimit_interaction_reply(
+          client, event,
+          "Unable to verify your daily command limit. Please try again later.");
+      return true;
+    }
+    return false;
+  }
+
+  char day[16];
+  get_today_utc(day, sizeof day);
+
+  rc = sqlite3_prepare_v2(
+      db,
+      "INSERT INTO msglimit_counts "
+      "(guild_id, user_id, day, text_count) VALUES (?, ?, ?, 1) "
+      "ON CONFLICT(guild_id, user_id, day) DO UPDATE SET "
+      "text_count = text_count + 1",
+      -1, &stmt, NULL);
+  if (rc != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 1, (sqlite3_int64)event->guild_id) != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 2, (sqlite3_int64)user->id) != SQLITE_OK ||
+      sqlite3_bind_text(stmt, 3, day, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    if (stmt)
+      sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  rc = sqlite3_prepare_v2(
+      db,
+      "SELECT text_count FROM msglimit_counts "
+      "WHERE guild_id = ? AND user_id = ? AND day = ?",
+      -1, &stmt, NULL);
+  if (rc != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 1, (sqlite3_int64)event->guild_id) != SQLITE_OK ||
+      sqlite3_bind_int64(stmt, 2, (sqlite3_int64)user->id) != SQLITE_OK ||
+      sqlite3_bind_text(stmt, 3, day, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    if (stmt)
+      sqlite3_finalize(stmt);
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  int count = 0;
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW)
+    count = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_ROW) {
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+    sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to verify your daily command limit. Please try again later.");
+    return true;
+  }
+
+  if (count <= text_limit)
+    return false;
+
+  msglimit_interaction_reply(
+      client, event,
+      "Daily text message limit reached. Try again after 00:00 UTC.");
+  return true;
+}
+
 bool message_is_forwarded(const struct discord_message *event) {
+#ifdef CONCORD_API_V3
+  /* The pinned upstream v3 model currently omits message_reference.type. */
+  (void)event;
+  return false;
+#else
   return event->message_reference && event->message_reference->type == 1;
+#endif
 }
 
 static bool apply_media_check(struct discord *client,

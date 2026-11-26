@@ -1,0 +1,65 @@
+name: Build bot against pinned Concord
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: concord-build-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gnu11-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out bot
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf libtool pkg-config libssl-dev zlib1g-dev libsqlite3-dev
+
+      - name: Build curl with WebSocket support
+        run: |
+          curl -fsSLo curl-8.23.0.tar.xz https://curl.se/download/curl-8.23.0.tar.xz
+          echo "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5  curl-8.23.0.tar.xz" | sha256sum --check
+          tar -xf curl-8.23.0.tar.xz
+          cd curl-8.23.0
+          ./configure --prefix=/usr/local --with-openssl --with-zlib --enable-websockets --without-libpsl
+          make -j2
+          sudo make install
+          sudo ldconfig
+          test -x /usr/local/bin/curl
+          /usr/local/bin/curl --version
+          /usr/local/bin/curl --version | grep '^Protocols:' | grep -Eq '(^|[[:space:]])ws([[:space:]]|$)'
+          /usr/local/bin/curl --version | grep '^Protocols:' | grep -Eq '(^|[[:space:]])wss([[:space:]]|$)'
+
+      - name: Check out pinned Concord dependency
+        run: |
+          test "$(cat CONCORD_REVISION)" = "3f70c141a07492842e57e55e7cb398aa46661ba4"
+          git clone https://github.com/Cogmasters/concord.git .concord-src
+          git -C .concord-src checkout --detach "$(cat CONCORD_REVISION)"
+          test "$(git -C .concord-src rev-parse HEAD)" = "$(cat CONCORD_REVISION)"
+
+      - name: Build and install Concord into the expected prefix
+        run: |
+          export CFLAGS="-O2 -I/usr/local/include"
+          make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" -j2
+          make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" install
+          test -s concord/lib/libdiscord.a
+          test -f concord/include/concord/interaction.h
+          test -f concord/include/concord/discord_codecs.h
+
+      - name: Build bot with GNU11
+        run: |
+          make -j2 CONCORD_API=v3
+          test -s bins/cfbot
+          file bins/cfbot

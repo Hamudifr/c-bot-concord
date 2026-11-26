@@ -30,11 +30,22 @@ static void on_modaction_fail(struct discord *client,
                               struct discord_response *resp) {
   u64snowflake channel_id = (u64snowflake)(intptr_t)resp->data;
   char buf[512];
+#ifdef CONCORD_API_V3
+  if (resp->json.start && resp->json.size > 0) {
+    size_t error_len = resp->json.size;
+    if (error_len > sizeof buf - sizeof("err: "))
+      error_len = sizeof buf - sizeof("err: ");
+    snprintf(buf, sizeof buf, "err: %.*s", (int)error_len, resp->json.start);
+  } else {
+    snprintf(buf, sizeof buf, "err: %s", discord_strerror(resp->code, client));
+  }
+#else
   if (resp->raw_error) {
     snprintf(buf, sizeof buf, "err: %s", resp->raw_error);
   } else {
     snprintf(buf, sizeof buf, "err: %s", discord_strerror(resp->code, client));
   }
+#endif
   struct discord_create_message params = {.content = buf};
   discord_create_message(client, channel_id, &params, NULL);
 }
