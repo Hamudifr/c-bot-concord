@@ -49,7 +49,8 @@ jobs:
 
       - name: Build and install Concord into the expected prefix
         run: |
-          make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" CFLAGS="-O2 -I/usr/local/include" -j2
+          export CFLAGS="-O2 -I/usr/local/include"
+          make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" -j2
           make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" install
           test -s concord/lib/libdiscord.a
           test -f concord/include/concord/interaction.h
