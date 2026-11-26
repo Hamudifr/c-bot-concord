@@ -211,8 +211,13 @@ bool msglimit_enforce_interaction(
     struct discord *client, const struct discord_interaction *event) {
   if (!event || event->type != DISCORD_INTERACTION_APPLICATION_COMMAND)
     return false;
-  if (!event->guild_id || !event->id || !event->token)
+  /* DM commands have no guild-scoped message-limit policy. */
+  if (!event->guild_id)
     return false;
+
+  /* A malformed guild interaction must never bypass the guard and dispatch. */
+  if (!event->id || !event->token)
+    return true;
 
   struct discord_user *user = NULL;
   if (event->member && event->member->user)
@@ -220,7 +225,13 @@ bool msglimit_enforce_interaction(
   else
     user = event->user;
 
-  if (!user || user->bot)
+  if (!user || !user->id) {
+    msglimit_interaction_reply(
+        client, event,
+        "Unable to identify your account for the daily command limit.");
+    return true;
+  }
+  if (user->bot)
     return false;
 
   sqlite3 *db = customcom_get_db();
