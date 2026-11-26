@@ -43,12 +43,17 @@ jobs:
       - name: Check out pinned Concord dependency
         run: |
           test "$(cat CONCORD_REVISION)" = "3f70c141a07492842e57e55e7cb398aa46661ba4"
-          git clone https://github.com/Cogmasters/concord.git concord
-          git -C concord checkout --detach "$(cat CONCORD_REVISION)"
-          test "$(git -C concord rev-parse HEAD)" = "$(cat CONCORD_REVISION)"
+          git clone https://github.com/Cogmasters/concord.git .concord-src
+          git -C .concord-src checkout --detach "$(cat CONCORD_REVISION)"
+          test "$(git -C .concord-src rev-parse HEAD)" = "$(cat CONCORD_REVISION)"
 
-      - name: Build Concord static library
-        run: make -C concord -j2
+      - name: Build and install Concord into the expected prefix
+        run: |
+          make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" CFLAGS="-O2 -I/usr/local/include" -j2
+          make -C .concord-src PREFIX="$GITHUB_WORKSPACE/concord" install
+          test -s concord/lib/libdiscord.a
+          test -f concord/include/concord/interaction.h
+          test -f concord/include/concord/discord_codecs.h
 
       - name: Build bot with GNU11
         run: |
