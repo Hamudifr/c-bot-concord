@@ -39,7 +39,8 @@ jobs:
           sudo ldconfig
           test -x /usr/local/bin/curl
           /usr/local/bin/curl --version
-          /usr/local/bin/curl --version | grep -q 'WebSockets'
+          /usr/local/bin/curl --version | grep '^Protocols:' | grep -Eq '(^|[[:space:]])ws([[:space:]]|$)'
+          /usr/local/bin/curl --version | grep '^Protocols:' | grep -Eq '(^|[[:space:]])wss([[:space:]]|$)'
 
       - name: Check out pinned Concord dependency
         run: |
