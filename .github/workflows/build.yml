@@ -33,7 +33,7 @@ jobs:
           echo "8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5  curl-8.23.0.tar.xz" | sha256sum --check
           tar -xf curl-8.23.0.tar.xz
           cd curl-8.23.0
-          ./configure --prefix=/usr/local --with-openssl --with-zlib --enable-websockets
+          ./configure --prefix=/usr/local --with-openssl --with-zlib --enable-websockets --without-libpsl
           make -j2
           sudo make install
           sudo ldconfig
