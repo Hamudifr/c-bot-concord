@@ -36,8 +36,21 @@ static bool message_is_media(const struct discord_message *event) {
     return true;
   if (event->sticker_items && event->sticker_items->size > 0)
     return true;
+#ifdef CONCORD_API_V3
+  /* Concord v3 does not expose message_reference.type. Count media carried
+   * by a resolved referenced message when Discord supplies it. */
+  if (event->referenced_message &&
+      ((event->referenced_message->attachments &&
+        event->referenced_message->attachments->size > 0) ||
+       (event->referenced_message->sticker_items &&
+        event->referenced_message->sticker_items->size > 0) ||
+       (event->referenced_message->embeds &&
+        event->referenced_message->embeds->size > 0)))
+    return true;
+#else
   if (event->message_reference && event->message_reference->type == 1)
     return true;
+#endif
   if (event->content &&
       (strstr(event->content, "http://") || strstr(event->content, "https://")))
     return true;
@@ -194,7 +207,7 @@ static void msglimit_interaction_reply(
   struct discord_interaction_response response = {
       .type = DISCORD_INTERACTION_CHANNEL_MESSAGE_WITH_SOURCE,
       .data = &(struct discord_interaction_callback_data){
-          .content = content,
+          .content = (char *)content,
           .flags = DISCORD_MESSAGE_EPHEMERAL,
       },
   };
@@ -374,7 +387,13 @@ bool msglimit_enforce_interaction(
 }
 
 bool message_is_forwarded(const struct discord_message *event) {
+#ifdef CONCORD_API_V3
+  /* The pinned upstream v3 model currently omits message_reference.type. */
+  (void)event;
+  return false;
+#else
   return event->message_reference && event->message_reference->type == 1;
+#endif
 }
 
 static bool apply_media_check(struct discord *client,

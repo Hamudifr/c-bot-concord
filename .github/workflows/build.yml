@@ -60,6 +60,6 @@ jobs:
 
       - name: Build bot with GNU11
         run: |
-          make -j2
+          make -j2 CONCORD_API=v3
           test -s bins/cfbot
           file bins/cfbot
