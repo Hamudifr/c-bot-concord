@@ -30,7 +30,7 @@ LDFLAGS := -L$(CONCORD_DIR)/lib
 LDLIBS  := -ldiscord -lsqlite3 -lpthread -lcurl -lm
 
 # === Rules ====================================================================
-.PHONY: all clean fclean re
+.PHONY: all clean fclean re test
 
 all: $(TARGET)
 
@@ -43,6 +43,17 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 
 $(OBJ_DIR) $(BIN_DIR):
 	mkdir -p $@
+
+# Uses real Concord headers, an in-memory SQLite DB, and stubbed Discord I/O.
+# No bot token or Discord connection is required.
+test: $(BIN_DIR)/test_msglimit
+	./$(BIN_DIR)/test_msglimit
+
+$(BIN_DIR)/test_msglimit: tests/test_msglimit.c srcs/mod/msglimit.c \
+                        include/mod/msglimit.h include/utils/utils.h \
+                        include/customcom/customcom.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) tests/test_msglimit.c srcs/mod/msglimit.c \
+		-o $@ -lsqlite3
 
 clean:
 	rm -rf $(OBJ_DIR)
