@@ -76,7 +76,9 @@ static bool message_is_media(const struct discord_message *event) {
     return true;
   if (event->sticker_items && event->sticker_items->size > 0)
     return true;
-  if (event->message_reference && event->message_reference->type == 1)
+  if (event->embeds && event->embeds->size > 0)
+    return true;
+  if (message_is_forwarded(event))
     return true;
   if (event->content &&
       (strstr(event->content, "http://") || strstr(event->content, "https://")))
@@ -239,7 +241,9 @@ bool msglimit_enforce(struct discord *client,
 }
 
 bool message_is_forwarded(const struct discord_message *event) {
-  return event->message_reference && event->message_reference->type == 1;
+  /* HAS_SNAPSHOT marks forwarded messages. Unlike message_reference.type,
+   * flags are decoded by stock Concord too. Ordinary replies are not media. */
+  return (event->flags & (1ULL << 14)) != 0;
 }
 
 static bool apply_media_check(struct discord *client,
@@ -271,15 +275,16 @@ static bool apply_media_check(struct discord *client,
   char day[16];
   get_today_utc(day, sizeof day);
 
-  /* an edit to a message from a previous day must not spend today's budget.
-   * partial MESSAGE_UPDATE payloads may omit the timestamp (0); in that case
-   * the dedupe claim below is the only guard, which is still correct. */
-  if (event->timestamp) {
-    char created[16];
-    day_from_ms(event->timestamp, created, sizeof created);
-    if (strcmp(created, day) != 0)
-      return false;
-  }
+  /* MESSAGE_UPDATE may omit timestamp. The snowflake always encodes the
+   * creation time, so old edits cannot spend today's budget even after the
+   * dedupe entry has been pruned. */
+  u64unix_ms created_ms = event->timestamp;
+  if (!created_ms)
+    created_ms = (event->id >> 22) + 1420070400000ULL;
+  char created[16];
+  day_from_ms(created_ms, created, sizeof created);
+  if (strcmp(created, day) != 0)
+    return false;
 
   if (msglimit_claim(db, event->id, "media_count", day)) {
     sqlite3_prepare_v2(db,
@@ -314,7 +319,35 @@ static bool apply_media_check(struct discord *client,
   return false;
 }
 
+static void msglimit_check_fetched(struct discord *client,
+                                   struct discord_response *response,
+                                   const struct discord_message *message) {
+  const struct discord_message *update = response->keep;
+  /* REST messages may omit guild_id; keep it from the gateway event. */
+  struct discord_message complete = *message;
+  complete.guild_id = update->guild_id;
+  apply_media_check(client, &complete);
+}
+
 void msglimit_enforce_edit(struct discord *client,
                            const struct discord_message *event) {
+  if (!event->guild_id || !event->id || !event->channel_id)
+    return;
+  if (event->author && msglimit_is_exempt(event))
+    return;
+
+  /* Gateway updates are partial, especially when a link preview arrives.
+   * Resolve missing author/content instead of treating it as an exemption or
+   * assuming the update describes the whole message. Concord keeps the event
+   * alive until the asynchronous request completes. Failed/deleted-message
+   * fetches do not count anything. */
+  if (!event->author || !event->content) {
+    struct discord_ret_message ret = {
+        .done = msglimit_check_fetched,
+        .keep = event,
+    };
+    discord_get_channel_message(client, event->channel_id, event->id, &ret);
+    return;
+  }
   apply_media_check(client, event);
 }
